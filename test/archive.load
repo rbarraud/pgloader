@@ -8,10 +8,16 @@
  */
 
 LOAD ARCHIVE
-   FROM http://pgsql.tapoueh.org/temp/foo.zip
+   -- FROM http://pgsql.tapoueh.org/temp/foo.zip
+   FROM http://geolite.maxmind.com/download/geoip/database/GeoLiteCity_CSV/GeoLiteCity-latest.zip
    INTO postgresql:///ip4r
 
-   BEFORE LOAD EXECUTE 'geolite.sql'
+   BEFORE LOAD
+     DO
+       $$ create extension if not exists ip4r; $$,
+       $$ create schema if not exists geolite; $$
+
+     EXECUTE 'geolite.sql'
 
    LOAD CSV
         FROM FILENAME MATCHING ~/GeoLiteCity-Location.csv/
@@ -19,13 +25,13 @@ LOAD ARCHIVE
              (
                 locId,
                 country,
-                region     null if blanks,
-                city       null if blanks,
-                postalCode null if blanks,
+                region     [ null if blanks ],
+                city       [ null if blanks ],
+                postalCode [ null if blanks ],
                 latitude,
                 longitude,
-                metroCode  null if blanks,
-                areaCode   null if blanks
+                metroCode  [ null if blanks ],
+                areaCode   [ null if blanks ]
              )
         INTO postgresql:///ip4r?geolite.location
              (
@@ -54,5 +60,5 @@ LOAD ARCHIVE
              fields escaped by double-quote,
              fields terminated by ','
 
-   FINALLY DO
-     $$ create index blocks_ip4r_idx on geolite.blocks using gist(iprange); $$;
+        AFTER LOAD DO
+          $$ create index blocks_ip4r_idx on geolite.blocks using gist(iprange); $$;

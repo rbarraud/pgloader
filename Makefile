@@ -1,42 +1,68 @@
 # pgloader build tool
 APP_NAME   = pgloader
-VERSION    = 3.0.99
+VERSION    = 3.5.2
 
 # use either sbcl or ccl
 CL	   = sbcl
+
+# default to 4096 MB of RAM size in the image
+DYNSIZE    = 4096
+
+LISP_SRC   = $(wildcard src/*lisp)         \
+             $(wildcard src/monkey/*lisp)  \
+             $(wildcard src/utils/*lisp)   \
+             $(wildcard src/load/*lisp)    \
+             $(wildcard src/parsers/*lisp) \
+             $(wildcard src/pg-copy/*lisp) \
+             $(wildcard src/pgsql/*lisp)   \
+             $(wildcard src/sources/*lisp) \
+             pgloader.asd
 
 BUILDDIR   = build
 LIBS       = $(BUILDDIR)/libs.stamp
 QLDIR      = $(BUILDDIR)/quicklisp
 MANIFEST   = $(BUILDDIR)/manifest.ql
 LATEST     = $(BUILDDIR)/pgloader-latest.tgz
-PGLOADER   = $(BUILDDIR)/bin/$(APP_NAME)
 
-BUILDAPP_CCL  = $(BUILDDIR)/bin/buildapp.ccl
-BUILDAPP_SBCL = $(BUILDDIR)/bin/buildapp.sbcl
+BUNDLEDIST = 2018-04-30
+BUNDLENAME = pgloader-bundle-$(VERSION)
+BUNDLEDIR  = $(BUILDDIR)/bundle/$(BUNDLENAME)
+BUNDLE     = $(BUILDDIR)/$(BUNDLENAME).tgz
+BUNDLETESTD= $(BUILDDIR)/bundle/test
+
+ifeq ($(OS),Windows_NT)
+EXE           = .exe
+COMPRESS_CORE = no
+DYNSIZE       = 1024		# support for windows 32 bits
+else
+EXE =
+endif
+
+PGLOADER   = $(BUILDDIR)/bin/$(APP_NAME)$(EXE)
+BUILDAPP_CCL  = $(BUILDDIR)/bin/buildapp.ccl$(EXE)
+BUILDAPP_SBCL = $(BUILDDIR)/bin/buildapp.sbcl$(EXE)
 
 ifeq ($(CL),sbcl)
-BUILDAPP   = $(BUILDAPP_SBCL)
-CL_OPTS    = --no-sysinit --no-userinit
+BUILDAPP      = $(BUILDAPP_SBCL)
+BUILDAPP_OPTS = --require sb-posix                      \
+                --require sb-bsd-sockets                \
+                --require sb-rotate-byte
+CL_OPTS    = --noinform --no-sysinit --no-userinit
 else
 BUILDAPP   = $(BUILDAPP_CCL)
 CL_OPTS    = --no-init
 endif
 
-COMPRESS_CORE ?= yes
-
 ifeq ($(CL),sbcl)
+COMPRESS_CORE ?= $(shell $(CL) --noinform \
+                               --quit     \
+                               --eval '(when (member :sb-core-compression cl:*features*) (write-string "yes"))')
+
+endif
+
+# note: on Windows_NT, we never core-compress; see above.
 ifeq ($(COMPRESS_CORE),yes)
 COMPRESS_CORE_OPT = --compress-core
-else
-COMPRESS_CORE_OPT = 
-endif
-endif
-
-ifeq ($(CL),sbcl)
-BUILDAPP_OPTS =          --require sb-posix                      \
-                         --require sb-bsd-sockets                \
-                         --require sb-rotate-byte
 endif
 
 DEBUILD_ROOT = /tmp/pgloader
@@ -44,29 +70,39 @@ DEBUILD_ROOT = /tmp/pgloader
 all: $(PGLOADER)
 
 clean:
-	rm -rf $(LIBS) $(QLDIR) $(MANIFEST) $(BUILDAPP) $(PGINSTALL)
-
-docs:
-	ronn -roff pgloader.1.md
+	rm -rf $(LIBS) $(QLDIR) $(MANIFEST) $(BUILDAPP) $(PGLOADER) docs/_build
 
 $(QLDIR)/local-projects/qmynd:
-	git clone https://github.com/qitab/qmynd.git $@
+	git clone --depth 1 https://github.com/qitab/qmynd.git $@
 
-qmynd: $(QLDIR)/local-projects/qmynd
-	cd $< && git pull
+$(QLDIR)/local-projects/cl-ixf:
+	git clone --depth 1 https://github.com/dimitri/cl-ixf.git $@
+
+$(QLDIR)/local-projects/cl-db3:
+	git clone --depth 1 https://github.com/dimitri/cl-db3.git $@
+
+$(QLDIR)/local-projects/cl-csv:
+	git clone --depth 1 https://github.com/AccelerationNet/cl-csv.git $@
 
 $(QLDIR)/setup.lisp:
 	mkdir -p $(BUILDDIR)
 	curl -o $(BUILDDIR)/quicklisp.lisp http://beta.quicklisp.org/quicklisp.lisp
-	$(CL) $(CL_OPTS) --load $(BUILDDIR)/quicklisp.lisp                         \
-             --eval '(quicklisp-quickstart:install :path "$(BUILDDIR)/quicklisp")' \
+	$(CL) $(CL_OPTS) --load $(BUILDDIR)/quicklisp.lisp                        \
+             --load src/getenv.lisp                                               \
+             --eval '(quicklisp-quickstart:install :path "$(BUILDDIR)/quicklisp" :proxy (getenv "http_proxy"))' \
              --eval '(quit)'
 
 quicklisp: $(QLDIR)/setup.lisp ;
 
-$(LIBS): $(QLDIR)/setup.lisp
-	$(CL) $(CL_OPTS) --load $(QLDIR)/setup.lisp                 \
-             --eval '(ql:quickload "pgloader")'                     \
+clones: $(QLDIR)/local-projects/cl-ixf \
+        $(QLDIR)/local-projects/cl-db3 \
+        $(QLDIR)/local-projects/cl-csv \
+        $(QLDIR)/local-projects/qmynd ;
+
+$(LIBS): $(QLDIR)/setup.lisp clones
+	$(CL) $(CL_OPTS) --load $(QLDIR)/setup.lisp                   \
+             --eval '(push "$(PWD)/" ql:*local-project-directories*)' \
+             --eval '(ql:quickload "pgloader")'                       \
              --eval '(quit)'
 	touch $@
 
@@ -95,7 +131,7 @@ $(BUILDAPP_SBCL): $(QLDIR)/setup.lisp
 
 buildapp: $(BUILDAPP) ;
 
-$(PGLOADER): $(MANIFEST) $(BUILDAPP) qmynd
+$(PGLOADER): $(MANIFEST) $(BUILDAPP) $(LISP_SRC)
 	mkdir -p $(BUILDDIR)/bin
 	$(BUILDAPP)      --logfile /tmp/build.log                \
                          $(BUILDAPP_OPTS)                        \
@@ -108,36 +144,74 @@ $(PGLOADER): $(MANIFEST) $(BUILDAPP) qmynd
                          --load-system $(APP_NAME)               \
                          --load src/hooks.lisp                   \
                          --entry pgloader:main                   \
-                         --dynamic-space-size 4096               \
+                         --dynamic-space-size $(DYNSIZE)         \
                          $(COMPRESS_CORE_OPT)                    \
-                         --output $@
+                         --output $@.tmp
+	# that's ugly, but necessary when building on Windows :(
+	mv $@.tmp $@
 
 pgloader: $(PGLOADER) ;
 
 pgloader-standalone:
-	$(BUILDAPP)    --require sb-posix                      \
-                       --require sb-bsd-sockets                \
-                       --require sb-rotate-byte                \
-                       --load-system pgloader                  \
+	$(BUILDAPP)    $(BUILDAPP_OPTS)                        \
+                       --sbcl $(CL)                            \
+                       --load-system $(APP_NAME)               \
+                       --load src/hooks.lisp                   \
                        --entry pgloader:main                   \
-                       --dynamic-space-size 4096               \
-                       --compress-core                         \
+                       --dynamic-space-size $(DYNSIZE)         \
+                       $(COMPRESS_CORE_OPT)                    \
                        --output $(PGLOADER)
+test: $(PGLOADER)
+	$(MAKE) PGLOADER=$(realpath $(PGLOADER)) CL=$(CL) -C test regress
 
-test:
-	$(MAKE) PGLOADER=$(realpath $(PGLOADER)) -C test all
+clean-bundle:
+	rm -rf $(BUNDLEDIR)
+	rm -rf $(BUNDLETESTD)/$(BUNDLENAME)/*
 
-deb: docs
+$(BUNDLETESTD):
+	mkdir -p $@
+
+$(BUNDLEDIR):
+	mkdir -p $@
+	$(CL) $(CL_OPTS) --load $(QLDIR)/setup.lisp      \
+             --eval '(defvar *bundle-dir* "$@")'         \
+             --eval '(defvar *pwd* "$(PWD)/")'           \
+             --eval '(defvar *ql-dist* "$(BUNDLEDIST)")' \
+             --load bundle/ql.lisp
+
+$(BUNDLE): $(BUNDLEDIR)
+	cp bundle/README.md $(BUNDLEDIR)
+	sed -e s/%VERSION%/$(VERSION)/ < bundle/Makefile > $(BUNDLEDIR)/Makefile
+	git archive --format=tar --prefix=pgloader-$(VERSION)/ master \
+	     | tar -C $(BUNDLEDIR)/local-projects/ -xf -
+	make QLDIR=$(BUNDLEDIR) clones
+	tar -C build/bundle 		    \
+            --exclude bin   		    \
+            --exclude test/sqlite           \
+            -czf $@ $(BUNDLENAME)
+
+bundle: clean-bundle $(BUNDLE) $(BUNDLETESTD)
+	tar -C $(BUNDLETESTD) -xf $(BUNDLE)
+	make -C $(BUNDLETESTD)/$(BUNDLENAME)
+	$(BUNDLETESTD)/$(BUNDLENAME)/bin/pgloader --version
+
+test-bundle:
+	$(MAKE) -C $(BUNDLEDIR) test
+
+
+deb:
 	# intended for use on a debian system
 	mkdir -p $(DEBUILD_ROOT) && rm -rf $(DEBUILD_ROOT)/*
-	rsync -Ca --exclude=build/* ./ $(DEBUILD_ROOT)/
+	rsync -Ca --exclude 'build'                      		  \
+		  --exclude '.vagrant'                   		  \
+              ./ $(DEBUILD_ROOT)/
 	cd $(DEBUILD_ROOT) && make -f debian/rules orig
 	cd $(DEBUILD_ROOT) && debuild -us -uc -sa
-	cp -a /tmp/pgloader_* build/
+	cp -a /tmp/pgloader_* /tmp/cl-pgloader* build/
 
 rpm:
 	# intended for use on a CentOS or other RPM based system
-	mkdir -p $(DEBUILD_ROOT) && rm -rf $(DEBUILD_ROOT)/*
+	mkdir -p $(DEBUILD_ROOT) && rm -rf $(DEBUILD_ROOT)
 	rsync -Ca --exclude=build/* ./ $(DEBUILD_ROOT)/
 	cd /tmp && tar czf $(HOME)/rpmbuild/SOURCES/pgloader-$(VERSION).tar.gz pgloader
 	cd $(DEBUILD_ROOT) && rpmbuild -ba pgloader.spec
@@ -162,4 +236,4 @@ latest:
 
 check: test ;
 
-.PHONY: test pgloader-standalone
+.PHONY: test pgloader-standalone docs bundle

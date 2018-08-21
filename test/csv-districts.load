@@ -9,6 +9,7 @@
 
 LOAD CSV
      FROM data/2013_Gaz_113CDs_national.txt
+     HAVING FIELDS
       (
          usps,          -- United States Postal Service State Abbreviation
          geoid,         -- Geographic Identifier
@@ -20,13 +21,16 @@ LOAD CSV
          intptlong      -- Longitude (decimal degrees)
       )
 
-     INTO postgresql:///pgloader?districts
+       INTO postgresql:///pgloader
+     TARGET TABLE districts
+     TARGET COLUMNS
       (
          usps, geoid, aland, awater, aland_sqmi, awater_sqmi,
          location point using (format nil "(~a,~a)" intptlong intptlat)
       )
 
      WITH truncate,
+          disable triggers,
           skip header = 1,
           batch rows = 200,
           batch size = 1024 kB,

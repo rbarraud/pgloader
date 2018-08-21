@@ -1,128 +1,272 @@
 ;;;; pgloader.asd
 
 (asdf:defsystem #:pgloader
-    :serial t
-    :description "Load data into PostgreSQL"
-    :author "Dimitri Fontaine <dimitri@2ndQuadrant.fr>"
-    :license "The PostgreSQL Licence"
-    :depends-on (#:uiop			; host system integration
-		 #:cl-log		; logging
-		 #:postmodern		; PostgreSQL protocol implementation
-		 #:cl-postgres		; low level bits for COPY streaming
-		 #:simple-date		; FIXME: recheck dependency
-		 #:qmynd		; MySQL protocol implemenation
-		 #:split-sequence	; some parsing is made easy
-		 #:cl-csv		; full CSV reader
-		 #:cl-fad		; file and directories
-		 #:lparallel		; threads, workers, queues
-		 #:esrap		; parser generator
-		 #:alexandria		; utils
-		 #:drakma		; http client, download archives
-		 #:zip			; support for zip archive files
-		 #:flexi-streams	; streams
-		 #:usocket		; UDP / syslog
-		 #:local-time		; UDP date parsing
-		 #:command-line-arguments ; for the main function
-		 #:abnf			; ABNF parser generator (for syslog)
-		 #:db3			; DBF version 3 file reader
-		 #:py-configparser	; Read old-style INI config files
-		 #:sqlite		; Query a SQLite file
-		 #:trivial-backtrace  	; For --debug cli usage
-                 #:cl-markdown          ; To produce the website
-		 )
-    :components
-    ((:module "src"
-	      :components
-	      ((:file "params")
+  :serial t
+  :description "Load data into PostgreSQL"
+  :author "Dimitri Fontaine <dim@tapoueh.org>"
+  :license "The PostgreSQL Licence"
+  :depends-on (#:uiop			; host system integration
+               #:cl-log                 ; logging
+               #:postmodern		; PostgreSQL protocol implementation
+               #:cl-postgres		; low level bits for COPY streaming
+               #:simple-date		; FIXME: recheck dependency
+               #:qmynd                  ; MySQL protocol implemenation
+               #:split-sequence         ; some parsing is made easy
+               #:cl-csv                 ; full CSV reader
+               #:cl-fad                 ; file and directories
+               #:lparallel		; threads, workers, queues
+               #:esrap                  ; parser generator
+               #:alexandria		; utils
+               #:drakma                 ; http client, download archives
+               #:flexi-streams          ; streams
+               #:usocket		; UDP / syslog
+               #:local-time		; UDP date parsing
+               #:command-line-arguments ; for the main function
+               #:abnf			; ABNF parser generator (for syslog)
+               #:db3			; DBF version 3 file reader
+               #:ixf			; IBM IXF file format reader
+               #:py-configparser	; Read old-style INI config files
+               #:sqlite                 ; Query a SQLite file
+               #:cl-base64              ; Decode base64 data
+               #:trivial-backtrace  	; For --debug cli usage
+               #:cl-markdown            ; To produce the website
+               #:metabang-bind          ; the bind macro
+               #:mssql                  ; M$ SQL connectivity
+               #:uuid               ; Transforming MS SQL unique identifiers
+               #:quri               ; decode URI parameters
+               #:cl-ppcre           ; Perl Compatible Regular Expressions
+               #:cl-mustache        ; Logic-less templates
+               #:yason              ; JSON routines
+               #:closer-mop         ; introspection
+               #:zs3                ; integration with AWS S3 for Redshift
+               )
+  :components
+  ((:module "src"
+            :components
+            ((:file "params")
+             (:file "package" :depends-on ("params"))
 
-	       (:file "package" :depends-on ("params"))
+             (:module "monkey"
+                      :components
+                      ((:file "bind")
+                       (:file "mssql")))
 
-	       (:file "logs"    :depends-on ("package" "params"))
+             (:module "utils"
+                      :depends-on ("package" "params")
+                      :components
+                      ((:file "charsets")
+                       (:file "logs")
+                       (:file "utils")
+                       (:file "state")
 
-	       (:file "monitor" :depends-on ("params"
-                                             "package"
-                                             "logs"))
+                       ;; user defined transforms package and pgloader
+                       ;; provided ones
+                       (:file "transforms")
 
-	       (:file "charsets":depends-on ("package"))
-	       (:file "utils"   :depends-on ("params"
-                                             "package"
-                                             "charsets"
-                                             "monitor"))
+                       ;; PostgreSQL related utils
+                       (:file "read-sql-files")
+                       (:file "queries")
+                       (:file "quoting"     :depends-on ("utils"))
+                       (:file "catalog"     :depends-on ("quoting"))
+                       (:file "alter-table" :depends-on ("catalog"))
 
-	       ;; those are one-package-per-file
-	       (:file "transforms")
-	       (:file "queue"     :depends-on ("params" "package"))
+                       ;; State, monitoring, reporting
+                       (:file "reject"  :depends-on ("state"))
+                       (:file "pretty-print-state" :depends-on ("state"))
+                       (:file "report"  :depends-on ("state"
+                                                     "pretty-print-state"
+                                                     "utils"
+                                                     "catalog"))
+                       (:file "monitor" :depends-on ("logs"
+                                                     "state"
+                                                     "reject"
+                                                     "report"))
+                       (:file "threads" :depends-on ("monitor"))
+                       (:file "archive" :depends-on ("monitor"))
 
-	       (:file "parser"    :depends-on ("package"
-                                               "params"
-                                               "transforms"
-                                               "utils"
-                                               "monitor"
-                                               "pgsql"))
+                       ;; generic connection api
+                       (:file "connection" :depends-on ("monitor"
+                                                        "archive"))))
 
-	       (:file "parse-ini" :depends-on ("package"
-                                               "params"
-                                               "utils"))
+             ;; package pgloader.pgsql
+             (:module pgsql
+                      :depends-on ("package" "params" "utils")
+                      :serial t
+                      :components
+                      ((:file "connection")
+                       (:file "pgsql-ddl")
+                       (:file "pgsql-schema")
+                       (:file "merge-catalogs" :depends-on ("pgsql-schema"))
+                       (:file "pgsql-trigger")
+                       (:file "pgsql-index-filter")
+                       (:file "pgsql-finalize-catalogs")
+                       (:file "pgsql-create-schema"
+                              :depends-on ("pgsql-trigger"))))
 
-	       (:file "archive"   :depends-on ("params"
-                                               "package"
-                                               "utils"
-                                               "sources"
-                                               "pgsql"))
+             ;; Source format specific implementations
+             (:module sources
+                      :depends-on ("monkey" ; mssql driver patches
+                                   "params"
+                                   "package"
+                                   "pgsql"
+                                   "utils")
+                      :components
+                      ((:module "common"
+                                :serial t
+                                :components
+                                ((:file "api")
+                                 (:file "methods")
+                                 (:file "md-methods")
+                                 (:file "casting-rules")
+                                 (:file "files-and-pathnames")
+                                 (:file "project-fields")))
 
-	       ;; package pgloader.pgsql
-	       (:module pgsql
-			:depends-on ("package"
-                                     "params"
-                                     "queue"
-                                     "utils"
-                                     "logs"
-                                     "monitor")
-			:components
-			((:file "copy-format")
-			 (:file "queries")
-			 (:file "schema")
-			 (:file "pgsql"
-				:depends-on ("copy-format"
-                                             "queries"
-                                             "schema"))))
+                       (:module "csv"
+                                :depends-on ("common")
+                                :components
+                                ((:file "csv-guess")
+                                 ;; (:file "csv-database")
+                                 (:file "csv")))
 
-	       ;; Source format specific implementations
-	       (:module sources
-			:depends-on ("params"
-                                     "package"
-                                     "pgsql"
-                                     "utils"
-                                     "logs"
-                                     "monitor"
-                                     "queue"
-                                     "transforms")
-			:components
-			((:file "sources")
-			 (:file "csv"     :depends-on ("sources"))
-			 (:file "fixed"   :depends-on ("sources"))
-			 (:file "db3"     :depends-on ("sources"))
-			 (:file "sqlite"  :depends-on ("sources"))
-			 (:file "syslog"  :depends-on ("sources"))
-			 (:file "mysql-cast-rules")
-			 (:file "mysql-schema")
-			 (:file "mysql-csv" :depends-on ("mysql-schema"))
-			 (:file "mysql" :depends-on ("mysql-cast-rules"
-						     "mysql-schema"))))
+                       (:file "fixed"
+                              :depends-on ("common" "csv"))
 
-	       ;; the main entry file, used when building a stand-alone
-	       ;; executable image
-	       (:file "main" :depends-on ("params"
-                                          "package"
-                                          "monitor"
-                                          "utils"
-                                          "parser"
-                                          "sources"))))
+                       (:file "copy"
+                              :depends-on ("common" "csv"))
 
-     ;; to produce the website
-     (:module "web"
-              :components
-              ((:module src
-                        :components
-                        ((:file "docs")))))))
+                       (:module "db3"
+                                :depends-on ("common" "csv")
+                                :components
+                                ((:file "db3-schema")
+                                 (:file "db3" :depends-on ("db3-schema"))))
+
+                       (:module "ixf"
+                                :depends-on ("common")
+                                :components
+                                ((:file "ixf-schema")
+                                 (:file "ixf" :depends-on ("ixf-schema"))))
+
+                                        ;(:file "syslog") ; experimental...
+
+                       (:module "sqlite"
+                                :serial t
+                                :depends-on ("common")
+                                :components
+                                ((:file "sqlite-cast-rules")
+                                 (:file "sqlite-schema")
+                                 (:file "sqlite")))
+
+                       (:module "mssql"
+                                :serial t
+                                :depends-on ("common")
+                                :components
+                                ((:file "mssql-cast-rules")
+                                 (:file "mssql-schema")
+                                 (:file "mssql")
+                                 (:file "mssql-index-filters")))
+
+                       (:module "mysql"
+                                :serial t
+                                :depends-on ("common")
+                                :components
+                                ((:file "mysql-cast-rules")
+                                 (:file "mysql-connection")
+                                 (:file "mysql-schema")
+                                 (:file "mysql")))
+
+                       (:module "pgsql"
+                                :serial t
+                                :depends-on ("common")
+                                :components ((:file "pgsql-cast-rules")
+                                             (:file "pgsql")))))
+
+             ;; package pgloader.copy
+             (:module "pg-copy"
+                      :depends-on ("params"
+                                   "package"
+                                   "utils"
+                                   "pgsql"
+                                   "sources")
+                      :serial t
+                      :components
+                      ((:file "copy-batch")
+                       (:file "copy-format")
+                       (:file "copy-db-write")
+                       (:file "copy-rows-in-stream")
+                       (:file "copy-rows-in-batch")
+                       (:file "copy-rows-in-batch-through-s3")
+                       (:file "copy-retry-batch")
+                       (:file "copy-from-queue")))
+
+             (:module "load"
+                      :depends-on ("params"
+                                   "package"
+                                   "utils"
+                                   "pgsql"
+                                   "sources")
+                      :serial t
+                      :components
+                      ((:file "api")
+                       (:file "copy-data")
+                       (:file "load-file")
+                       (:file "migrate-database")))
+
+             (:module "parsers"
+                      :depends-on ("params"
+                                   "package"
+                                   "utils"
+                                   "pgsql"
+                                   "sources"
+                                   "monkey")
+                      :serial t
+                      :components
+                      ((:file "parse-ini")
+                       (:file "template")
+                       (:file "command-utils")
+                       (:file "command-keywords")
+                       (:file "command-regexp")
+                       (:file "parse-pgpass")
+                       (:file "command-db-uri")
+                       (:file "command-source")
+                       (:file "command-options")
+                       (:file "command-sql-block")
+                       (:file "command-sexp")
+                       (:file "command-csv")
+                       (:file "command-ixf")
+                       (:file "command-fixed")
+                       (:file "command-copy")
+                       (:file "command-dbf")
+                       (:file "command-cast-rules")
+                       (:file "command-materialize-views")
+                       (:file "command-alter-table")
+                       (:file "command-mysql")
+                       (:file "command-including-like")
+                       (:file "command-mssql")
+                       (:file "command-sqlite")
+                       (:file "command-pgsql")
+                       (:file "command-archive")
+                       (:file "command-parser")
+                       (:file "parse-sqlite-type-name")
+                       (:file "date-format")))
+
+             ;; the main entry file, used when building a stand-alone
+             ;; executable image
+             (:file "api"  :depends-on ("params"
+                                        "package"
+                                        "utils"
+                                        "parsers"
+                                        "sources"))
+
+             (:module "regress"
+                      :depends-on ("params" "package" "utils" "pgsql" "api")
+                      :components ((:file "regress")))
+
+
+             (:file "main" :depends-on ("params"
+                                        "package"
+                                        "utils"
+                                        "parsers"
+                                        "sources"
+                                        "api"
+                                        "regress"))))))
 

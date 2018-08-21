@@ -1,7 +1,7 @@
 Summary:            extract, transform and load data into PostgreSQL
 Name:               pgloader
-Version:            3.0.99
-Release:            21%{?dist}
+Version:            3.3.2
+Release:            22%{?dist}
 License:            The PostgreSQL Licence
 Group:              System Environment/Base
 Source:             %{name}-%{version}.tar.gz
@@ -31,17 +31,32 @@ make pgloader
 %install
 install -m 755 -d %{buildroot}/%{_bindir}
 cp build/bin/pgloader %{buildroot}/%{_bindir}/pgloader
+mkdir -p $RPM_BUILD_ROOT/etc/prelink.conf.d
+echo '-b /usr/bin/pgloader' > $RPM_BUILD_ROOT/etc/prelink.conf.d/%{name}.conf
 
 %files
 %doc README.md pgloader.1.md
 %{_bindir}/*
+/etc/prelink.conf.d/%{name}.conf
 
 %changelog
+* Thu Jan 22 2015 Dimitri Fontaine <dimitri@2ndQuadrant.fr> - 3.2.1.preview-22
+- Release 3.2.1.preview
+
+* Thu Jan 15 2015 Dimitri Fontaine <dimitri@2ndQuadrant.fr> - 3.2.0-22
+- Release 3.2.0
+
+* Wed Nov 5 2014 Dimitri Fontaine <dimitri@2ndQuadrant.fr> - 3.1.1-22
+- Release 3.1.1
+
+* Wed Sep 10 2014 Dimitri Fontaine <dimitri@2ndQuadrant.fr> - 3.1.0-22
+- Release 3.1.0
+
 * Tue Apr 29 2014 Dimitri Fontaine <dimitri@2ndQuadrant.fr> 3.0.99
 - Assorted fixes, release candidate 9
-* Thu Dec 23 2013 Dimitri Fontaine <dimitri@2ndQuadrant.fr> 3.0.98
+* Mon Dec 23 2013 Dimitri Fontaine <dimitri@2ndQuadrant.fr> 3.0.98
 - Assorted fixes, release candidate 8
-* Wed Dec 15 2013 Dimitri Fontaine <dimitri@2ndQuadrant.fr> 3.0.97
+* Sun Dec 15 2013 Dimitri Fontaine <dimitri@2ndQuadrant.fr> 3.0.97
 - Assorted fixes, release candidate 7
 * Tue Dec 10 2013 Dimitri Fontaine <dimitri@2ndQuadrant.fr> 3.0.96
 - Package as an RPM

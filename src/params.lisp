@@ -6,82 +6,67 @@
 (defpackage #:pgloader.params
   (:use #:cl)
   (:export #:*version-string*
-	   #:*csv-path-root*
+           #:*dry-run*
+           #:*on-error-stop*
+           #:on-error-stop
+           #:*self-upgrade-immutable-systems*
+	   #:*fd-path-root*
 	   #:*root-dir*
 	   #:*log-filename*
+           #:*summary-pathname*
 	   #:*client-min-messages*
 	   #:*log-min-messages*
+           #:*report-stream*
+           #:*pgsql-reserved-keywords*
+           #:*identifier-case*
+           #:*preserve-index-names*
 	   #:*copy-batch-rows*
            #:*copy-batch-size*
-           #:*concurrent-batches*
-	   #:*pgconn-host*
-	   #:*pgconn-port*
-	   #:*pgconn-user*
-	   #:*pgconn-pass*
-	   #:*pg-dbname*
+           #:*rows-per-range*
+           #:*prefetch-rows*
 	   #:*pg-settings*
-	   #:*myconn-host*
-	   #:*myconn-port*
-	   #:*myconn-user*
-	   #:*myconn-pass*
-	   #:*my-dbname*
-	   #:*state*
+           #:*mysql-settings*
+           #:*mssql-settings*
 	   #:*default-tmpdir*
 	   #:init-params-from-environment
-	   #:getenv-default))
+	   #:getenv-default
+           #:*context*
+
+           #:+os-code-success+
+           #:+os-code-error+
+           #:+os-code-error-usage+
+           #:+os-code-error-bad-source+
+           #:+os-code-error-regress+))
 
 (in-package :pgloader.params)
 
 (defparameter *release* nil
   "non-nil when this build is a release build.")
 
-(defparameter *major-version* "3.0")
-(defparameter *minor-version* "99")
+(defparameter *major-version* "3.5")
+(defparameter *minor-version* "2")
 
 (defun git-hash ()
   "Return the current abbreviated git hash of the development tree."
-  (let ((git-hash `("git" "--no-pager" "log" "-n1" "--format=format:%h")))
-    (uiop:with-current-directory ((asdf:system-source-directory :pgloader))
-      (multiple-value-bind (stdout stderr code)
-          (uiop:run-program git-hash :output :string)
-        (declare (ignore code stderr))
-        stdout))))
+  (handler-case
+      (let ((git-hash `("git" "--no-pager" "log" "-n1" "--format=format:%h")))
+        (multiple-value-bind (stdout stderr code)
+            (uiop:run-program git-hash :output :string
+                              :directory (asdf:system-source-directory :pgloader))
+          (declare (ignore code stderr))
+          stdout))
+    (condition (e)
+      ;; in case anything happen, just return X.Y.Z~devel
+      (declare (ignore e))
+      (format nil "~a~~devel" *minor-version*))))
 
 (defparameter *version-string*
   (concatenate 'string *major-version* "."
                (if *release* *minor-version* (git-hash)))
   "pgloader version strings, following Emacs versionning model.")
 
-;; we can't use pgloader.utils:make-pgstate yet because params is compiled
-;; first in the asd definition, we just make the symbol a special variable.
-(defparameter *state* nil
-  "State of the current loading.")
-
-(defparameter *csv-path-root*
-  (merge-pathnames "csv/" (user-homedir-pathname)))
-
-(defparameter *root-dir*
-  (make-pathname :directory "/tmp/pgloader/")
-  "Top directory where to store all data logs and reject files.")
-
-(defparameter *log-filename*
-  (make-pathname :directory "/tmp/pgloader/" :name "pgloader" :type "log")
-  "Main pgloader log file")
-
-(defparameter *client-min-messages* :notice)
-(defparameter *log-min-messages* :info)
-
-;;;
-;;; How to split batches in case of data loading errors.
-;;;
-(defparameter *copy-batch-rows* 25000
-  "How many rows to batch per COPY transaction.")
-
-(defparameter *copy-batch-size* (* 20 1024 1024)
-  "Maximum memory size allowed for a single batch.")
-
-(defparameter *concurrent-batches* 10
-  "How many batches do we stack in the queue in advance.")
+(defvar *self-upgrade-immutable-systems* nil
+  "Used for --self-upgrade.")
 
 ;;;
 ;;; We need that to setup our default connection parameters
@@ -92,33 +77,85 @@
      DEFAULT if that variable isn't set"
     (or (uiop:getenv name) default)))
 
-;;;
-;;; PostgreSQL Connection Credentials and Session Settings
-;;;
-(defparameter *pgconn-host* "localhost")
-(defparameter *pgconn-port* (parse-integer (getenv-default "PGPORT" "5432")))
-(defparameter *pgconn-user* (uiop:getenv "USER"))
-(defparameter *pgconn-pass* "pgpass")
-(defparameter *pg-dbname* nil)
-(defparameter *pg-settings* nil "An alist of GUC names and values.")
+(defparameter *dry-run* nil
+  "Set to non-nil to only run checks about the load setup.")
+
+(defparameter *on-error-stop* nil
+  "Set to non-nil to for pgloader to refrain from handling errors, quitting instead.")
+
+(define-condition on-error-stop ()
+  ((on-condition :initarg :on-condition :reader on-error-condition
+                 :documentation "Condition that triggered on-error-stop"))
+  (:report (lambda (condition stream)
+             (format stream
+                     "On Error Stop: ~a"
+                     (on-error-condition condition)))))
+
+(defparameter *fd-path-root* nil
+  "Where to load files from, when loading from an archive or expanding regexps.")
+
+(defparameter *root-dir*
+  #+unix (uiop:parse-native-namestring "/tmp/pgloader/")
+  #-unix (uiop:merge-pathnames*
+          (uiop:make-pathname* :directory '(:relative "pgloader"))
+          (uiop:ensure-directory-pathname (getenv-default "Temp")))
+  "Top directory where to store all data logs and reject files.")
+
+(defparameter *log-filename*
+  (make-pathname :defaults *root-dir*
+                 :name "pgloader"
+                 :type "log")
+  "Main pgloader log file")
+
+(defparameter *summary-pathname* nil "Pathname where to output the summary.")
+
+(defparameter *client-min-messages* :notice)
+(defparameter *log-min-messages* :info)
+
+(defparameter *report-stream* *terminal-io*
+  "Stream where to format the output stream.")
 
 ;;;
-;;; MySQL Connection Credentials
+;;; When converting from other databases, how to deal with case sensitivity?
 ;;;
-(defparameter *myconn-host* "localhost")
-(defparameter *myconn-port* 3306)
-(defparameter *myconn-user* (uiop:getenv "USER"))
-(defparameter *myconn-pass* nil)
-(defparameter *my-dbname* nil)
+(defvar *pgsql-reserved-keywords* nil
+  "We need to always quote PostgreSQL reserved keywords")
+
+(defparameter *identifier-case* :downcase
+  "Dealing with source databases casing rules.")
+
+(defparameter *preserve-index-names* nil
+  "Dealing with source databases index naming.")
+
+;;;
+;;; How to split batches in case of data loading errors.
+;;;
+(defparameter *copy-batch-rows* 25000
+  "How many rows to batch per COPY transaction.")
+
+(defparameter *copy-batch-size* (* 20 1024 1024)
+  "Maximum memory size allowed for a single batch.")
+
+(defparameter *prefetch-rows* 100000
+  "How many rows do read in advance in the reader queue.")
+
+(defparameter *rows-per-range* 10000
+  "How many rows to read in each reader's thread, per SQL query.")
+
+(defparameter *pg-settings* nil "An alist of GUC names and values.")
+(defparameter *mysql-settings* nil "An alist of GUC names and values.")
+(defparameter *mssql-settings* nil "An alist of GUC names and values.")
 
 ;;;
 ;;; Archive processing: downloads and unzip.
 ;;;
 (defparameter *default-tmpdir*
   (let* ((tmpdir (uiop:getenv "TMPDIR"))
-	 (tmpdir (or (and tmpdir (probe-file tmpdir)) "/tmp"))
-	 (tmpdir (fad:pathname-as-directory tmpdir)))
-    (fad:pathname-as-directory (merge-pathnames "pgloader" tmpdir)))
+	 (tmpdir (or (and tmpdir (probe-file tmpdir))
+                     #+unix #P"/tmp/"
+                     #-unix (uiop:ensure-directory-pathname
+                             (getenv-default "Temp")))))
+    (uiop:ensure-directory-pathname (merge-pathnames "pgloader" tmpdir)))
   "Place where to fetch and expand archives on-disk.")
 
 ;;;
@@ -133,3 +170,21 @@
   (setf *default-tmpdir*
 	(fad:pathname-as-directory
 	 (getenv-default "TMPDIR" *default-tmpdir*))))
+
+;;;
+;;; Run time context to fill-in variable parts of the commands.
+;;;
+(defvar *context* nil
+  "Alist of (names . values) intialized from the environment at run-time,
+  and from a --context command line argument, then used in the commands when
+  they are using the Mustache templating feature.")
+
+;;;
+;;; Some command line constants for OS errors codes
+;;;
+(defparameter +os-code-success+          0)
+(defparameter +os-code-error+            1)
+(defparameter +os-code-error-usage+      2)
+(defparameter +os-code-error-bad-source+ 4)
+(defparameter +os-code-error-regress+    5)
+
